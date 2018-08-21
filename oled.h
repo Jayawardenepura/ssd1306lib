@@ -276,3 +276,21 @@ OLED_err OLED_put_pixel(OLED *oled, uint8_t x, uint8_t y, bool pixel_state);
  * (!) Notice: method is not atomic. If required, protect it with lock
  */
 OLED_err OLED_put_rectangle(OLED *oled, uint8_t x_from, uint8_t y_from, uint8_t x_to, uint8_t y_to, enum OLED_params params);
+
+/**
+*OLED_put_curve - plot curve on the OLED
+*@x_left,y_left -> the first point of curve
+*@tan_l -> the angle of a tangent of the first point in fixed-point
+*@x_right,y_right -> the second point of curve
+*@tan_r -> the angle of a tangent of the first point in fixed-point
+
+*How to convert float angle into the fixed-point q16.16?
+*You are able to set angle [0;2*PI]->[0;2^16]
+*0 	-> 0
+*2*PI 	-> 65536 = 2^16
+*If your angle 13 degrees -> 0.2269 rad -> 2367 is argument!
+*
+*/
+OLED_err OLED_put_curve(OLED *oled,uint8_t x_left, uint8_t y_left, uint16_t tan_l, uint8_t x_right, uint8_t y_right,uint16_t tan_r,enum OLED_params params);
+
+

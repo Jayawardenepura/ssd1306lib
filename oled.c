@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdfix.h>
 
 #if !defined(OLED_NO_I2C)
 /***** I2C-related logic *****/
@@ -331,5 +332,188 @@ OLED_err OLED_put_rectangle(OLED *oled, uint8_t x_from, uint8_t y_from, uint8_t 
 		}
 	//}
 
+	return OLED_EOK;
+}
+
+/*
+ * Fixed point multiplication.
+ *
+ * Multiply two fixed point numbers in u16,16 (unsigned 0.16) format.
+ * Returns result in the same format.
+ * Rounds to nearest, ties rounded up.
+ */
+static uint16_t mul_fix_u16(uint16_t x, uint16_t y)
+{
+    uint16_t result;
+    /* Optimized ASM version. */
+    asm volatile(
+	    "mul  %B1, %B2\n\t"
+	    "movw %A0, r0\n\t"
+	    "ldi  r19, 0x80\n\t"
+	    "clr  r18\n\t"
+	    "mul  %A1, %A2\n\t"
+	    "add  r19, r1\n\t"
+	    "adc  %A0, r18\n\t"
+	    "adc  %B0, r18\n\t"
+	    "mul  %B1, %A2\n\t"
+	    "add  r19, r0\n\t"
+	    "adc  %A0, r1\n\t"
+	    "adc  %B0, r18\n\t"
+	    "mul  %A1, %B2\n\t"
+	    "add  r19, r0\n\t"
+	    "adc  %A0, r1\n\t"
+	    "adc  %B0, r18\n\t"
+	    "clr  r1"
+        : "=&r" (result)
+        : "r" (x), "r" (y)
+        : "r18", "r19"
+    );
+    return result;
+}
+ 
+/*
+ * Cheap and rough fixed point multiplication: multiply only the high
+ * bytes of the operands, return 16 bit result.
+ *
+ * For some reason, the equivalent macro compiles to inefficient code.
+ * This compiles to 3 instructions (mul a,b; movw res,r0; clr r1).
+ */
+static uint16_t mul_high_bytes(uint16_t x, uint16_t y)
+{
+    return (uint8_t)(x >> 8) * (uint8_t)(y >> 8);
+}
+ 
+static inline int16_t sin_fix(uint16_t x)
+{
+    return cos_fix(0xc000 + x);
+}
+
+/*
+ * Fixed point cos() function: sixth degree polynomial approximation.
+ *
+ * argument is in units of 2*M_PI/2^16.
+ * result is in units of 1/2^14 (range = [-2^14 : 2^14]).
+ *
+ * Uses the approximation
+ *      cos(M_PI/2*x) ~ P(x^2), with
+ *      P(u) = (1 - u) * (1 - u * (0.23352 - 0.019531 * u))
+ * for x in [0 : 1]. Max error = 9.53e-5
+ */
+int16_t cos_fix(uint16_t x)
+{
+    uint16_t y, s;
+    uint8_t i = (x >> 8) & 0xc0;  // quadrant information
+    x = (x & 0x3fff) << 1;        // .15
+    if (i & 0x40) x = FIXED(1, 15) - x;
+    x = mul_fix_u16(x, x) << 1;   // .15
+    y = FIXED(1, 15) - x;         // .15
+    s = FIXED(0.23361, 16) - mul_high_bytes(FIXED(0.019531, 17), x); // .16
+    s = FIXED(1, 15) - mul_fix_u16(x, s);  // .15
+    s = mul_fix_u16(y, s);        // .14
+    return (i == 0x40 || i == 0x80) ? -s : s;
+}
+ 
+OLED_err OLED_put_curve(OLED *oled,uint8_t x_left, uint8_t y_left, uint16_t tan_l, uint8_t x_right, uint8_t y_right,uint16_t tan_r,enum OLED_params params)
+{
+
+	if (params > (OLED_BLACK | OLED_FILL))
+		return OLED_EPARAMS;
+	bool pixel_color = (OLED_BLACK & params) != 0;
+	bool is_fill = (OLED_FILL & params) != 0;
+
+/* Limit coordinates to display bounds */
+	uint8_t size_errors = 0;
+	uint8_t w_max = oled->width - 1;
+	uint8_t h_max = oled->height - 1;
+	if (x_left > w_max) {
+		x_left = w_max;
+		size_errors++;
+	}
+	if (x_right > w_max) {
+		x_right = w_max;
+		size_errors++;
+	}
+	if (y_left > h_max) {
+		y_left = h_max;
+		size_errors++;
+	}
+	if (y_right > h_max) {
+		y_right = h_max;
+		size_errors++;
+	}
+	if (size_errors >= 4)
+		return OLED_EBOUNDS;
+
+	int8_t x_avrg,y_avrg;
+	
+/* Calculating Sin,Cos via Fixed-point */
+	accum sin_val_l = sin_fix(tan_l);
+	accum cos_val_l = cos_fix(tan_l);
+
+	accum sin_val_r = sin_fix(tan_r);
+	accum cos_val_r = cos_fix(tan_r);
+
+
+/* Calculating tangnet via q14.14 Fixed-point. 
+	Covert: fixed-point -> accum(like a float) | 16384 = 2^14 */
+	accum the_machine_tan_l = (sin_val_l/16384.0)/(cos_val_l/16384.0);
+	accum the_machine_tan_r = (sin_val_r/16384.0)/(cos_val_r/16384.0);
+
+/* y_left = 15; */
+
+	x_avrg = ((the_machine_tan_r * x_right) - (the_machine_tan_l * x_left) + y_left - y_right) / (the_machine_tan_r - the_machine_tan_l);
+	y_avrg = (the_machine_tan_l * (x_avrg - x_left)) + y_left;
+	
+/* point of intersection of tangents. You may delete this line */
+        OLED_put_pixel_(oled,(int8_t)x_avrg,(int8_t)y_avrg,pixel_color); 
+	
+
+/* Bresenham's algorithm see 
+	https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm */
+
+	int32_t sx = x_right-x_avrg, sy = y_right-y_avrg;
+	/* relative values for checks */
+	int32_t xx = x_left-x_avrg, yy = y_left-y_avrg, xy;       
+ 	/* curvature */  
+	double dx, dy, err, cur = xx*sy-yy*sx;                   	
+
+
+ 	/* begin with longer part */ 
+	if (sx*(int32_t)sx+sy*(int32_t)sy > xx*xx+yy*yy) {
+		/* swap P0 P2 */
+		x_right = x_left; x_left = sx+x_avrg; y_right = y_left; y_left = sy+y_avrg; cur = -cur;  
+	}  
+	if (cur != 0) {                                   
+		/* x step direction */
+		xx += sx; xx *= sx = x_left < x_right ? 1 : -1;    
+		/* y step direction */      
+		yy += sy; yy *= sy = y_left < y_right ? 1 : -1;     
+		/* differences 2nd degree */    
+		xy = 2*xx*yy; xx *= xx; yy *= yy;        
+	if (cur*sx*sy < 0) {                          
+		xx = -xx; yy = -yy; xy = -xy; cur = -cur;
+	}
+
+		 /* differences 1st degree */
+		dx = 4.0*sy*cur*(x_avrg-x_left)+xx-xy;          
+		dy = 4.0*sx*cur*(y_left-y_avrg)+yy-xy;
+			   /* error 1st step */    
+		xx += xx; yy += yy; err = dx+dy+xy;             
+	do {         
+
+		/* plot curve */                     
+		OLED_put_pixel_(oled,x_left,y_left,pixel_color);       
+		 /* last pixel -> curve finished */                            
+	if (x_left == x_right && y_left == y_right) return; 
+
+		 /* save value for test of y step */
+		y_avrg = 2*err < dx;            
+
+		/* x step */	     
+	if (2*err > dy) { x_left += sx; dx -= xy; err += dy += yy; }
+		/* y step */ 
+	if (    y_avrg    ) { y_left += sy; dy -= xy; err += dx += xx; } 
+		} while (dy < dx );         
+	}
 	return OLED_EOK;
 }
