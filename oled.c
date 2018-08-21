@@ -459,8 +459,6 @@ OLED_err OLED_put_curve(OLED *oled,uint8_t x_left, uint8_t y_left, uint16_t tan_
 	accum the_machine_tan_l = (sin_val_l/16384.0)/(cos_val_l/16384.0);
 	accum the_machine_tan_r = (sin_val_r/16384.0)/(cos_val_r/16384.0);
 
-/* y_left = 15; */
-
 	x_avrg = ((the_machine_tan_r * x_right) - (the_machine_tan_l * x_left) + y_left - y_right) / (the_machine_tan_r - the_machine_tan_l);
 	y_avrg = (the_machine_tan_l * (x_avrg - x_left)) + y_left;
 	
